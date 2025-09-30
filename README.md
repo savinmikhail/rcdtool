@@ -52,6 +52,8 @@ api_id: 32767
 api_hash: ed855a59bbe4a3360dbf7a0538842142
 ```
 
+You might have problems with registering new app, consider following these advices: https://habr.com/ru/articles/923168/
+
 Then rename `config.ini.sample` to `config.ini`, edit it and save wherever you want. If the file is in the same directory as `rcdtool` and its name is exactly "config.ini", then `rcdtool` will load it automatically.
 
 The first time, **rcdtool** will ask you for your phone number, and will start a login process. When this is done, a `.session` file will be created. With this `.session` file, the tool could access to your Telegram account to read messages and download medias. The name of the .session file is set in `config.ini`.
