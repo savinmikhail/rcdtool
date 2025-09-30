@@ -29,6 +29,7 @@ import random
 import asyncio
 from dataclasses import dataclass
 from typing import Optional, Coroutine, cast
+from urllib.parse import urlparse
 import argparse
 
 from rcdtool.rcdtool import RCD
@@ -155,7 +156,7 @@ def main():
 
     rcd_tool = RCD(args.config_filename, dry_mode=args.dry_mode)
 
-    raw_targets: list[tuple[int|str, int]] = []
+    raw_targets: list[tuple[int|str, int, Optional[int]]] = []
 
     if args.link is None:
         channel_id = args.channel_id or input('Channel ID: ')
@@ -168,7 +169,7 @@ def main():
         for (start, end) in range_message_id:
             logger.debug('range(%s, %s)', start, end)
             for current_message_id in range(start, end + 1):
-                raw_targets.append((channel_id, current_message_id))
+                raw_targets.append((channel_id, current_message_id, utils.parse_message_id(args.discussion_message_id) if args.discussion_message_id is not None else None))
         logger.debug('target: %s', raw_targets)
     else:
         links: list[str] = []
@@ -181,15 +182,42 @@ def main():
         
         for link in links:
             logger.debug('current link: %s', link)
-            channel_id, message_id = link.split('/')[-2:]
-            logger.debug('current message_id options: %s', message_id)
-            message_id_list: list[str] = []
-            range_message_id = utils.parse_ranges(message_id)
+            channel_id_segment: Optional[str] = None
+            message_segment: Optional[str] = None
+            discussion_segment: Optional[str] = None
+
+            try:
+                parsed = urlparse(link)
+                path = parsed.path or ''
+                parts = [p for p in path.split('/') if p]
+                if 'c' in parts:
+                    c_index = parts.index('c')
+                    tail = parts[c_index + 1:]
+                    if len(tail) >= 1:
+                        channel_id_segment = tail[0]
+                    if len(tail) >= 2:
+                        message_segment = tail[1]
+                    if len(tail) >= 3:
+                        discussion_segment = tail[2]
+                # Fallback to old behavior if parsing failed
+                if channel_id_segment is None or message_segment is None:
+                    channel_id_segment, message_segment = link.split('/')[-2:]
+            except Exception:  # pragma: no cover - safe fallback
+                channel_id_segment, message_segment = link.split('/')[-2:]
+
+            logger.debug('current message_id options: %s', message_segment)
+            range_message_id = utils.parse_ranges(message_segment)
 
             for (start, end) in range_message_id:
                 logger.debug('range(%s, %s)', start, end)
                 for current_message_id in range(start, end + 1):
-                    raw_targets.append((channel_id, current_message_id))
+                    raw_targets.append((
+                        channel_id_segment,
+                        current_message_id,
+                        utils.parse_message_id(discussion_segment) if discussion_segment is not None else (
+                            utils.parse_message_id(args.discussion_message_id) if args.discussion_message_id is not None else None
+                        )
+                    ))
             logger.debug('target: %s', raw_targets)
 
     output_filename: Optional[str] = args.output_filename
@@ -197,7 +225,7 @@ def main():
     coros: list[Coroutine[None, None, Optional[str]]] = []
 
     exclude_names: list[str] = []
-    for channel_id, message_id in raw_targets:
+    for channel_id, message_id, target_discussion_message_id in raw_targets:
         updated_channel_id = utils.parse_channel_id(channel_id)
         updated_message_id = utils.parse_message_id(message_id)
         logger.debug('downloading from %s:%s', channel_id,message_id)
@@ -219,7 +247,7 @@ def main():
             message_id=updated_message_id,
             output_filename=final_output_filename,
             infer_extension=args.infer_extension,
-            discussion_message_id=utils.parse_message_id(args.discussion_message_id) if args.discussion_message_id is not None else None,
+            discussion_message_id=target_discussion_message_id,
         )
         coros.append(coro)
 
