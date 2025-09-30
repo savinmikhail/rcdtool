@@ -91,3 +91,26 @@ rcdtool -c config.ini -C qwert -M 34 -O download/base --infer-extension
 ---
 
 If you want to find a media in a comment on a channel post, use `--discussion-message-id` to set the message id of the comment.
+
+## Docker
+
+You can run this app inside a docker container, see Makefile
+
+
+### Makefile shortcuts
+
+Prefer one-liners via `make` (defaults include `--infer-extension` so files get a proper extension):
+
+- Build and prepare:
+
+```
+make build
+make setup
+```
+
+- Start a long‑lived container once, then exec commands inside it:
+
+```
+make up         # builds image, prepares data/, runs container as a daemon
+make shell      # optional: drop into /work inside the container
+```
