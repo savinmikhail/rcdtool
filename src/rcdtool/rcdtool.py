@@ -195,6 +195,16 @@ class RCD:
             import time
             last_t = 0.0
             last_b = 0
+
+            def _fmt_bytes(n: int | float) -> tuple[float, str]:
+                units = ['B', 'KB', 'MB', 'GB', 'TB']
+                val = float(n)
+                idx = 0
+                while val >= 1024.0 and idx < len(units) - 1:
+                    val /= 1024.0
+                    idx += 1
+                return val, units[idx]
+
             def _progress(bytes_downloaded: int, total: Optional[int]):
                 nonlocal last_t, last_b
                 now = time.time()
@@ -204,19 +214,15 @@ class RCD:
                 if now - last_t >= 1.0:
                     delta_b = bytes_downloaded - last_b
                     speed = delta_b / (now - last_t)
-                    # human readable speed
-                    units = 'B/s'
-                    val = speed
-                    for u in ['KB/s','MB/s','GB/s']:
-                        if val > 1024:
-                            val /= 1024
-                            units = u
-                        else:
-                            break
+                    spd_val, spd_unit = _fmt_bytes(speed)
+                    cur_val, cur_unit = _fmt_bytes(bytes_downloaded)
                     if total:
-                        logger.info('progress: %.1f%% at %.2f %s', bytes_downloaded * 100 / total, val, units)
+                        tot_val, tot_unit = _fmt_bytes(total)
+                        percent = bytes_downloaded * 100 / total
+                        logger.info('progress: %.2f %s/%.2f %s (%.1f%%) at %.2f %s',
+                                    cur_val, cur_unit, tot_val, tot_unit, percent, spd_val, spd_unit)
                     else:
-                        logger.info('progress: %d bytes at %.2f %s', bytes_downloaded, val, units)
+                        logger.info('progress: %.2f %s at %.2f %s', cur_val, cur_unit, spd_val, spd_unit)
                     last_t, last_b = now, bytes_downloaded
 
             # Use low-level download_file for broad Telethon compatibility and control
