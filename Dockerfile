@@ -13,7 +13,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy metadata first to leverage Docker layer caching
-COPY pyproject.toml README.md /app/
+# Project metadata and helper scripts
+COPY pyproject.toml README.md scripts /app/
+# Optional samples and inputs
+COPY .stuff /app/.stuff
 COPY src /app/src
 
 # Install the package so the `rcdtool` CLI entrypoint is available

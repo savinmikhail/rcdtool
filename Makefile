@@ -1,32 +1,30 @@
 SHELL := bash
 
-# Minimal, simple targets for a long-lived container
+# docker compose driven workflow
+COMPOSE  ?= docker compose
+SERVICE  ?= rcdtoold
 IMG      ?= rcdtool
 NAME     ?= rcdtoold
 DATA_DIR ?= $(CURDIR)/data
 UID      := $(shell id -u 2>/dev/null || echo 1000)
 GID      := $(shell id -g 2>/dev/null || echo 1000)
 
-.PHONY: build up down ps shell run
+.PHONY: build up up-nc down ps bash logs restart
 
 build:
-	docker build -t $(IMG) .
+	UID=$(UID) GID=$(GID) $(COMPOSE) build
 
-up: build
+up: ## Start long‑lived dev container with volumes
 	@mkdir -p "$(DATA_DIR)"
 	@if [ ! -f "$(DATA_DIR)/config.ini" ]; then cp -n config.ini.sample "$(DATA_DIR)/config.ini"; fi
-	@if docker ps -a --format '{{.Names}}' | grep -qx "$(NAME)"; then \
-		docker start "$(NAME)" >/dev/null; \
-	else \
-		docker run -d --restart unless-stopped --name "$(NAME)" \
-		  -v "$(DATA_DIR):/work" \
-		  --user $(UID):$(GID) \
-		  --entrypoint sh "$(IMG)" -c 'sleep infinity' >/dev/null; \
-	fi
-	@docker ps --filter name="^$(NAME)$$" --format 'Running: {{.Names}} ({{.Status}})'
+	UID=$(UID) GID=$(GID) $(COMPOSE) up -d
+	@$(COMPOSE) ps
 
 down:
-	@docker rm -f "$(NAME)" >/dev/null 2>&1 || true; echo "+ Removed: $(NAME)"
+	$(COMPOSE) down
 
-shell: up
-	docker exec -it -w /work "$(NAME)" bash
+bash:
+	$(COMPOSE) exec -w /work $(SERVICE) bash
+
+restart:
+	$(COMPOSE) restart $(SERVICE)
