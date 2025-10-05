@@ -9,6 +9,9 @@ WORKDIR /app
 
 # Ensure readline is available for interactive prompts
 RUN apt-get update \
+    && apt-get install curl -y \
+    && curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh  | bash \
+    && apt-get install speedtest -y \
     && apt-get install -y --no-install-recommends libreadline8 \
     && rm -rf /var/lib/apt/lists/*
 

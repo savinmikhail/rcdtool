@@ -6,7 +6,7 @@ services:
     image: rcdtool
     restart: unless-stopped
     working_dir: /work
-    user: "${UID}:${GID}"
+    user: "${DOCKER_UID}:${DOCKER_GID}"
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1

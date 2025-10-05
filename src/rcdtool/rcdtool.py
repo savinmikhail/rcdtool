@@ -67,13 +67,24 @@ class RCD:
         Returns:
             TelegramClient: The Telegram client object.
         """
+        # Optional tuning knobs with sensible defaults
+        timeout = int(self.config['Client'].get('timeout', '7000'))
+        device_model = self.config['Client'].get('device_model', 'scriptgram')
+        lang_code = self.config['Client'].get('lang_code', 'en-US')
+        request_retries = int(self.config['Client'].get('request_retries', '5'))
+        retry_delay = int(self.config['Client'].get('retry_delay', '2'))
+        connection_retries = int(self.config['Client'].get('connection_retries', '5'))
+
         client = TelegramClient(
             session=self.config['Access']['session'],
             api_id=int(self.config['Access']['id']),
             api_hash=self.config['Access']['hash'],
-            timeout=int(self.config['Client']['timeout']),
-            device_model=self.config['Client']['device_model'],
-            lang_code=self.config['Client']['lang_code'],
+            timeout=timeout,
+            device_model=device_model,
+            lang_code=lang_code,
+            request_retries=request_retries,
+            retry_delay=retry_delay,
+            connection_retries=connection_retries,
         )
         client.start()
         return client
@@ -83,6 +94,8 @@ class RCD:
                       message_id: int,
                       output_filename: str,
                       infer_extension: Optional[bool] = None,
+                      workers: Optional[int] = None,
+                      part_size_kb: Optional[int] = None,
                       discussion_message_id: Optional[int] = None,
                       ):
         """Read a message in a channel and download the media to output.
@@ -174,17 +187,81 @@ class RCD:
                 logger.warning('No media found')
                 return
 
-            with open(output_filename, 'wb+') as file:
-                if isinstance(media, tg_types.MessageMediaPaidMedia):
-                    logger.debug('paid message found')
-                    for message_extended_media in media.extended_media:
-                        if isinstance(message_extended_media, tg_types.MessageExtendedMedia):
-                            await self.client.download_file(message_extended_media.media, file)
+            # Resolve defaults from config if not provided
+            cfg_workers = int(self.config['Client'].get('workers', '4'))
+            cfg_part_kb = int(self.config['Client'].get('part_size_kb', '512'))
+
+            # Throttle logs: progress callback every ~1s
+            import time
+            last_t = 0.0
+            last_b = 0
+            def _progress(bytes_downloaded: int, total: Optional[int]):
+                nonlocal last_t, last_b
+                now = time.time()
+                if last_t == 0.0:
+                    last_t, last_b = now, bytes_downloaded
+                    return
+                if now - last_t >= 1.0:
+                    delta_b = bytes_downloaded - last_b
+                    speed = delta_b / (now - last_t)
+                    # human readable speed
+                    units = 'B/s'
+                    val = speed
+                    for u in ['KB/s','MB/s','GB/s']:
+                        if val > 1024:
+                            val /= 1024
+                            units = u
                         else:
-                            logger.warning('Cannot find a message extended media')
-                            return
-                else:
-                    await self.client.download_file(media, file)
+                            break
+                    if total:
+                        logger.info('progress: %.1f%% at %.2f %s', bytes_downloaded * 100 / total, val, units)
+                    else:
+                        logger.info('progress: %d bytes at %.2f %s', bytes_downloaded, val, units)
+                    last_t, last_b = now, bytes_downloaded
+
+            # Use low-level download_file for broad Telethon compatibility and control
+            import inspect
+
+            async def _dl_file(input_media, out_path: str):
+                sig = None
+                try:
+                    sig = inspect.signature(self.client.download_file)
+                except Exception:
+                    sig = None
+
+                kwargs = {
+                    'file': out_path,
+                    'part_size_kb': part_size_kb or cfg_part_kb,
+                    'progress_callback': _progress,
+                }
+                # Add workers only if supported in this Telethon version
+                if sig and 'workers' in sig.parameters:
+                    if workers or cfg_workers:
+                        kwargs['workers'] = workers or cfg_workers
+
+                try:
+                    await self.client.download_file(input_media, **kwargs)
+                except TypeError:
+                    # Fallback: remove optional kwargs progressively
+                    kwargs.pop('progress_callback', None)
+                    try:
+                        await self.client.download_file(input_media, **kwargs)
+                    except TypeError:
+                        kwargs.pop('part_size_kb', None)
+                        kwargs.pop('workers', None)
+                        await self.client.download_file(input_media, **kwargs)
+
+            if isinstance(media, tg_types.MessageMediaPaidMedia):
+                logger.debug('paid message found')
+                for message_extended_media in media.extended_media:
+                    if isinstance(message_extended_media, tg_types.MessageExtendedMedia):
+                        await _dl_file(message_extended_media.media, output_filename)
+                    else:
+                        logger.warning('Cannot find a message extended media')
+                        return
+                logger.info('downloaded to %s', output_filename)
+            else:
+                await _dl_file(media, output_filename)
                 logger.info('downloaded to %s', output_filename)
 
                 if infer_extension:
