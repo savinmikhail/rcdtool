@@ -116,3 +116,7 @@ make setup
 make up         # builds image, prepares data/, runs container as a daemon
 make shell      # optional: drop into /work inside the container
 ```
+
+```bash
+docker exec -it -w /work rcdtoold python3 /app/rcdtool_from_messages.py --infer-extension -f /app/.stuff/messages.md -c /work/config.ini
+```

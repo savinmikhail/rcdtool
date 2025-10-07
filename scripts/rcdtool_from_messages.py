@@ -3,17 +3,21 @@
 Read `.stuff/messages.md` and run rcdtool per line.
 
 Each line format: `<link> ; <description>`
- - `<link>`: Telegram message link (e.g., https://t.me/c/123/456)
+ - `<link>`: Telegram message link (e.g., https://t.me/c/<channel>/<topic>/<message>)
  - `<description>`: Used as the base output filename.
+
+Two execution modes:
+ - inproc (default): import and reuse a single RCD client (avoids SQLite session lock issues)
+ - subprocess: shell out to the `rcdtool` CLI for each line
 
 Usage examples:
   python scripts/rcdtool_from_messages.py \
-      -f .stuff/messages.md -c config.ini --infer-extension
+      -f .stuff/messages.md -c config.ini --infer-extension --mode inproc
 
 Notes:
- - Uses `-O <name>` to set the base filename.
- - If `rcdtool` CLI is not on PATH, falls back to `python -m rcdtool.main` with PYTHONPATH=src.
  - Sanitizes the description into a safe filename while preserving Unicode letters.
+ - In inproc mode, supports --workers/--part-size-kb to tune performance.
+ - If `rcdtool` CLI is not on PATH, subprocess mode falls back to `python -m rcdtool.main` with PYTHONPATH=src.
 """
 
 from __future__ import annotations
@@ -25,6 +29,18 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# In inproc mode we import the package directly (PYTHONPATH=/app/src is set in compose)
+try:
+    from rcdtool.rcdtool import RCD
+    import rcdtool.utils as utils
+    from rcdtool.main import generate_unique_filename
+    _HAVE_INPROC = True
+except Exception:
+    RCD = None  # type: ignore
+    utils = None  # type: ignore
+    generate_unique_filename = None  # type: ignore
+    _HAVE_INPROC = False
 
 
 def sanitize_filename(name: str) -> str:
@@ -89,6 +105,24 @@ def main() -> int:
         help="Pass --detailed-name to rcdtool (adds channel/message to name)",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Concurrent download workers (inproc mode)",
+    )
+    parser.add_argument(
+        "--part-size-kb",
+        type=int,
+        default=None,
+        help="Chunk size in KiB (inproc mode)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["inproc", "subprocess"],
+        default="inproc",
+        help="Execution mode (default: inproc)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the commands without executing",
@@ -104,18 +138,23 @@ def main() -> int:
     if not config_path.exists():
         print(f"Warning: config not found: {config_path}", file=sys.stderr)
 
-    base_cmd = resolve_executor()
-    if base_cmd is None:
-        print("Unable to resolve rcdtool executor", file=sys.stderr)
-        return 2
-
-    # Ensure PYTHONPATH includes src for the fallback case
-    env = os.environ.copy()
-    if base_cmd[:3] == [sys.executable, "-m", "rcdtool.main"]:
-        src_path = str((Path.cwd() / "src").resolve())
-        env["PYTHONPATH"] = f"{src_path}:{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else src_path
+    use_inproc = (args.mode == "inproc") and _HAVE_INPROC
+    if not use_inproc:
+        base_cmd = resolve_executor()
+        if base_cmd is None:
+            print("Unable to resolve rcdtool executor", file=sys.stderr)
+            return 2
+        # Ensure PYTHONPATH includes src for the fallback case
+        env = os.environ.copy()
+        if base_cmd[:3] == [sys.executable, "-m", "rcdtool.main"]:
+            src_path = str((Path.cwd() / "src").resolve())
+            env["PYTHONPATH"] = f"{src_path}:{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else src_path
+    else:
+        # Build a single reusable client
+        rcd_tool = RCD(str(config_path), dry_mode=args.dry_run)  # type: ignore[name-defined]
 
     # Process each non-empty, non-comment line
+    exclude_names: list[str] = []
     with in_path.open("r", encoding="utf-8") as fh:
         for ln_num, raw in enumerate(fh, start=1):
             line = raw.strip()
@@ -138,7 +177,6 @@ def main() -> int:
 
             # Detect /c/<channel>/<topic>/<message> or /c/<channel>/<message>
             # We must skip the middle "topic" id if present and use the last part as message id.
-            cmd: list[str]
             chan_msg = None  # tuple[channel_id, message_id]
             try:
                 if "/c/" in link:
@@ -163,29 +201,73 @@ def main() -> int:
             except Exception:
                 chan_msg = None
 
-            if chan_msg:
+            if use_inproc and chan_msg:
                 channel_id, message_id = chan_msg
-                cmd = [*base_cmd, "-c", str(config_path), "-C", channel_id, "-M", message_id, "-O", out_base]
+                final_output = generate_unique_filename(  # type: ignore[name-defined]
+                    out_base,
+                    bool(args.detailed_name),
+                    f'-{channel_id}-{message_id}',
+                    exclude_names,
+                )
+                exclude_names.append(final_output)
+
+                if args.dry_run:
+                    print(f"DRY INPROC: {link} -> {final_output}")
+                    continue
+
+                print(f"Line {ln_num}: {link} -> {out_base}")
+                try:
+                    res = rcd_tool.client.loop.run_until_complete(  # type: ignore[attr-defined]
+                        rcd_tool.download_media(
+                            channel_id=utils.parse_channel_id(channel_id),  # type: ignore[name-defined]
+                            message_id=utils.parse_message_id(message_id),  # type: ignore[name-defined]
+                            output_filename=final_output,
+                            infer_extension=args.infer_extension,
+                            workers=args.workers,
+                            part_size_kb=args.part_size_kb,
+                        )
+                    )
+                    if res:
+                        print(res)
+                except Exception as e:
+                    print(f"  Error: {e}", file=sys.stderr)
             else:
-                cmd = [*base_cmd, "-c", str(config_path), "--link", link, "-O", out_base]
-            if args.infer_extension:
-                cmd.append("--infer-extension")
-            if args.detailed_name:
-                cmd.append("--detailed-name")
+                # subprocess mode or non-standard link; fall back to CLI
+                base_cmd = resolve_executor()
+                if base_cmd is None:
+                    print("Unable to resolve rcdtool executor", file=sys.stderr)
+                    return 2
+                env = os.environ.copy()
+                if base_cmd[:3] == [sys.executable, "-m", "rcdtool.main"]:
+                    src_path = str((Path.cwd() / "src").resolve())
+                    env["PYTHONPATH"] = f"{src_path}:{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else src_path
 
-            if args.dry_run:
-                print("DRY:", " ".join(repr(c) if " " in c else c for c in cmd))
-                continue
+                if chan_msg:
+                    channel_id, message_id = chan_msg
+                    cmd = [*base_cmd, "-c", str(config_path), "-C", channel_id, "-M", message_id, "-O", out_base]
+                else:
+                    cmd = [*base_cmd, "-c", str(config_path), "--link", link, "-O", out_base]
+                if args.infer_extension:
+                    cmd.append("--infer-extension")
+                if args.detailed_name:
+                    cmd.append("--detailed-name")
+                if args.workers:
+                    cmd += ["--workers", str(args.workers)]
+                if args.part_size_kb:
+                    cmd += ["--part-size-kb", str(args.part_size_kb)]
 
-            print(f"Line {ln_num}: {link} -> {out_base}")
-            try:
-                # Stream output directly to the console
-                proc = subprocess.run(cmd, env=env, check=False)
-                if proc.returncode != 0:
-                    print(f"  Error (exit {proc.returncode}) on line {ln_num}", file=sys.stderr)
-            except FileNotFoundError as e:
-                print(f"  Executor not found: {e}", file=sys.stderr)
-                return 127
+                if args.dry_run:
+                    print("DRY:", " ".join(repr(c) if " " in c else c for c in cmd))
+                    continue
+
+                print(f"Line {ln_num}: {link} -> {out_base}")
+                try:
+                    proc = subprocess.run(cmd, env=env, check=False)
+                    if proc.returncode != 0:
+                        print(f"  Error (exit {proc.returncode}) on line {ln_num}", file=sys.stderr)
+                except FileNotFoundError as e:
+                    print(f"  Executor not found: {e}", file=sys.stderr)
+                    return 127
 
     return 0
 

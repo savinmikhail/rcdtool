@@ -133,7 +133,7 @@ class RCD:
                 logger.warning('Cannot continue because the got type is not a Message')
                 return
 
-            logger.info('downloading...')
+            # defer logging until we finalize the target message
 
             if discussion_message_id:
                 logger.info('finding message from a discussion group')
@@ -181,7 +181,54 @@ class RCD:
 
             if self.dry_mode:
                 return output_filename
-            
+
+            # Try to compute and log media size (when available) before download
+            def _fmt_bytes(n: int | float) -> tuple[float, str]:
+                units = ['B', 'KB', 'MB', 'GB', 'TB']
+                val = float(n)
+                idx = 0
+                while val >= 1024.0 and idx < len(units) - 1:
+                    val /= 1024.0
+                    idx += 1
+                return val, units[idx]
+
+            def _get_media_size(m) -> Optional[int]:
+                try:
+                    if isinstance(m, tg_types.MessageMediaDocument) and isinstance(m.document, tg_types.Document):
+                        return int(getattr(m.document, 'size', 0) or 0) or None
+                    if isinstance(m, tg_types.MessageMediaPhoto) and isinstance(m.photo, tg_types.Photo):
+                        sizes = getattr(m.photo, 'sizes', []) or []
+                        candidates = [getattr(s, 'size', None) for s in sizes]
+                        candidates = [int(x) for x in candidates if isinstance(x, int)]
+                        return max(candidates) if candidates else None
+                    if isinstance(m, tg_types.MessageMediaPaidMedia):
+                        total = 0
+                        found = False
+                        for em in m.extended_media:
+                            if isinstance(em, tg_types.MessageExtendedMedia):
+                                inner = em.media
+                                if isinstance(inner, tg_types.Document):
+                                    total += int(getattr(inner, 'size', 0) or 0)
+                                    found = True
+                                elif isinstance(inner, tg_types.Photo):
+                                    sizes = getattr(inner, 'sizes', []) or []
+                                    candidates = [getattr(s, 'size', None) for s in sizes]
+                                    candidates = [int(x) for x in candidates if isinstance(x, int)]
+                                    if candidates:
+                                        total += max(candidates)
+                                        found = True
+                        return total if found else None
+                except Exception:
+                    return None
+                return None
+
+            pre_media = message.media
+            pre_size = _get_media_size(pre_media)
+            if pre_size:
+                s_val, s_unit = _fmt_bytes(pre_size)
+                logger.info('size: %.2f %s', s_val, s_unit)
+            logger.info('downloading...')
+
             media = message.media
             if media is None:
                 logger.warning('No media found')

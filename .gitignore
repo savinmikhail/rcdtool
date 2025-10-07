@@ -168,3 +168,6 @@ config.ini
 *.jpg
 *.png
 *.pdf
+*.mov
+*.webm
+*.mkv
